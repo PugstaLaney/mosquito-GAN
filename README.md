@@ -1,6 +1,17 @@
 # mosquito-GAN
 
-> **A personal learning project.** This repository is my exploration of the pg-gan-mosquito codebase and the ideas in the accompanying paper. It is **not** original research and does not present any new methods or results. Everything technically interesting here — the demographic model, the GAN architecture, the mosquito adaptations — is the work of the Mathieson lab and their collaborators. My contribution is a set of annotated notebooks that walk through their code piece by piece to help me (and anyone else learning this material) understand how it fits together.
+$\color{red}{\textsf{\textbf{A personal learning project — not original research. All methods and code shown here are the work of the Mathieson lab.}}}$
+
+> [!CAUTION]
+> **This repository is a personal learning project.** It is my exploration of the pg-gan-mosquito codebase and the ideas in the accompanying paper.
+>
+> It is **NOT** original research and does not present any new methods or results.
+>
+> Everything technically interesting here — the demographic model, the GAN architecture, the mosquito adaptations — is the work of the **Mathieson lab and their collaborators**. My contribution is a set of annotated notebooks that walk through their code piece by piece to help me (and anyone else learning this material) understand how it fits together.
+>
+> If you are looking for the actual scientific work, please go to:
+> - The paper: [Eneli et al. 2025 on bioRxiv](https://doi.org/10.1101/2025.06.26.661760)
+> - The code: [github.com/mathiesonlab/pg-gan-mosquito](https://github.com/mathiesonlab/pg-gan-mosquito)
 
 ## Full credit and attribution
 

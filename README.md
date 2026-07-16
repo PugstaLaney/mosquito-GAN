@@ -75,6 +75,8 @@ Plus two fixed calibration constants: mutation rate `mut = 3.5×10⁻⁹` per si
 
 ## The full pipeline
 
+At a glance:
+
 ```
 1. Data prep       VCF (Ag1000G Phase 2) → HDF5
 2. Simulator       θ vector + msprime → synthetic genotype matrix     ← notebook 01
@@ -84,7 +86,117 @@ Plus two fixed calibration constants: mutation rate `mut = 3.5×10⁻⁹` per si
 6. Evaluate        Summary statistics, Wasserstein distance vs real
 ```
 
-My notebooks walk through individual pipeline stages, starting with the simulator (step 2).
+My notebooks walk through individual pipeline stages, starting with the simulator (step 2). Each step expanded below.
+
+### Step 1: Data prep (VCF → HDF5)
+
+**Input:** raw whole-genome VCF files from Ag1000G Phase 2.
+
+**About Ag1000G Phase 2.** The *Anopheles gambiae* **1000 Genomes** Project (a public genomics consortium releasing whole-genome sequences of malaria vector mosquitoes), operated by the MalariaGEN network. The "1000" naming echoes the human 1000 Genomes Project which set the pattern for population-scale variant catalogs. Phase 2 contains **1,142 wild-caught mosquitoes** from 13 sub-Saharan African countries, deep whole-genome sequenced. Covers two species (*An. gambiae*, *An. coluzzii*) plus a few hybrid forms. Free download at [malariagen.net](http://www.malariagen.net/data-package/ag1000g-phase-2-ar1/) after a click-through agreement. Delivered as one VCF per chromosome arm (2L, 2R, 3L, 3R, X, mitochondria).
+
+**What VCF is.** Variant Call Format, the standard text-based bioinformatics format for storing genetic variants. One row per variant, columns for chromosome, position, reference allele, alternate allele(s), quality, and per-sample genotype calls (e.g. `0/1` = heterozygous).
+
+**Two sub-steps in the data prep stage:**
+
+1. **Filter the raw VCF** (done externally with tools like `bcftools`; not in the repo):
+   - **Keep only chromosome arms 3L and 3R.** Rationale: chromosome 2 (arms 2L, 2R) has multiple large polymorphic inversions in *An. gambiae* which suppress recombination locally and create genealogical patterns that would confound demographic inference. The X chromosome is hemizygous in males (males have only one copy), so its effective population size is 3/4 that of the autosomes and its coalescent dynamics differ. Chromosome 3's autosomal arms are the "cleanest" surface for standard coalescent-based demographic inference.
+   - **Keep only biallelic SNPs.** Pg-gan encodes each site as 0/1 (ancestral vs. derived); triallelic and tetrallelic sites (~26% of *An. gambiae* variants) can't fit that scheme and are dropped.
+   - **Keep only sites passing Ag1000G's quality filters** and inside acceptable chromatin regions.
+   - **Exclude the *Gste* gene region.** *Gste* (glutathione S-transferase epsilon cluster) is under strong recent selection for insecticide resistance, which would violate pg-gan's neutral-coalescent assumption.
+   - **Subset samples to the analysis pair:** 31 Guinea (GN) + 81 Burkina Faso (BF) = 112 diploid individuals.
+2. **Convert the filtered VCF to HDF5** (`vcf2hdf5.py` in the repo, ~50 lines wrapping one `scikit-allel` call):
+   - Keeps only three fields: `CHROM` (chromosome name), `POS` (position in bp), `GT` (genotype calls).
+   - Discards everything else (quality, INFO annotations, sample metadata).
+   - HDF5 gives fast random access to arbitrary sample × SNP slices, which pg-gan needs thousands of times during training. VCF's text format would be prohibitively slow for that access pattern.
+
+**Output:** an HDF5 file containing genotype matrices for chromosomes 3L and 3R, restricted to the 112 GN + BF samples.
+
+**Where in the repo:** `vcf2hdf5.py` for the conversion; `real_data_random.py` reads the HDF5 during training.
+
+### Step 2: Simulator (θ + msprime → genotype matrix)
+
+**Input:** a demographic parameter vector θ (see the parameter table above).
+
+**What it does:** runs a coalescent simulation under the demographic model defined by θ. This is the "generator" half of the GAN, but the generator is a physics simulator (`msprime`), not a neural network.
+
+**How it works:**
+- `simulation.dadi_joint_mig` builds an `msprime.Demography` object from θ (population sizes, split times, migration rates).
+- Calls `msprime.sim_ancestry` to draw a random coalescent tree sequence over a 5 kb region for 224 haplotypes.
+- Calls `msprime.sim_mutations` to sprinkle mutations onto the tree at rate μ per generation of branch length.
+- Returns a `TreeSequence` object, from which the genotype matrix is extracted.
+
+**Output:** synthetic genotype matrix of shape roughly (600-700 SNPs × 224 haplotypes), values 0/1. Same shape and format as a real data batch, so the discriminator can't tell them apart on structural grounds.
+
+**Where in the repo:** `simulation.py`, `param_set.py`, `global_vars.py`. **Notebook 01 in this repo walks through this stage end-to-end.**
+
+### Step 3: Discriminator (CNN scoring real vs. simulated)
+
+**Input:** a batch of genotype matrices (real or simulated), shape `(batch, 224, 72, 2)`. The two channels are (a) allele values 0/1 and (b) the inter-SNP distances.
+
+**What it is:** a convolutional neural network with roughly a million trainable weights.
+
+**Architecture** (from `discriminator.py`):
+- Several convolutional layers scanning across the (haplotypes × SNPs) matrix.
+- A permutation-invariant pooling step over the haplotype dimension: mean rather than sum, because the two populations have different sample sizes and summing would let the larger one dominate.
+- Dense layers projecting to a single sigmoid output.
+
+**Output:** a probability per region: 0 means "confident this is fake", 1 means "confident this is real".
+
+**How it's trained:** standard supervised binary classification with the AdamW optimizer. It's told which regions are real and which are simulated, and updates via backprop.
+
+**Where in the repo:** `discriminator.py`.
+
+### Step 4: GAN training (interleaved updates)
+
+**What happens:** the main training loop alternates between two update rules on every iteration:
+
+- **Discriminator update.** Take a batch of real regions plus a batch of simulated regions from the current θ. Forward-pass through the CNN. Compute binary cross-entropy loss against the true labels. Backprop. Update the discriminator's weights with AdamW.
+- **θ update.** Propose K candidate perturbations to the current θ (Normal draws around each parameter, clipped to `[min, max]`). For each candidate, simulate a fresh batch of regions and score them with the frozen discriminator. Whichever candidate produced regions that scored highest as "real" becomes the new θ. This is a discrete search, not gradient descent, because msprime is not differentiable.
+
+**Why it converges:** early in training, θ is a wild guess and the discriminator can easily tell simulated from real (accuracy near 100% on simulated data). As θ improves under selection pressure to fool the discriminator, the simulated regions become more realistic. At convergence, the discriminator's accuracy on simulated data drops toward 50%. That's the Nash equilibrium: the simulator has become good enough that even a well-trained CNN can't reliably distinguish simulated from real.
+
+**Where in the repo:** `pg_gan.py` (the main training loop).
+
+**Output:** a fitted θ vector (Table 1 in the paper). Also a trained discriminator that could be re-used for other tasks (e.g. as an outlier detector for regions that don't fit the neutral demographic history).
+
+### Step 5: Model select (which demographic model fits?)
+
+**The problem:** you can fit two different demographic models to the same data (e.g. one with post-split migration, one without). Which one better matches reality?
+
+**The novel move in this paper.** Instead of using classical model-selection metrics like AIC or likelihood ratio tests, the authors train a SECOND CNN whose only job is to classify simulated regions as "came from mig model" or "came from no-mig model", and then let it vote on real data.
+
+**How it works:**
+1. Simulate many regions under the fitted no-mig parameters. Label as 0.
+2. Simulate many regions under the fitted mig parameters. Label as 1.
+3. Train a fresh CNN (same architecture as the discriminator) as a binary classifier on this simulated data.
+4. Feed real data through the trained classifier and count how it labels each region.
+
+**The paper's finding:** 74.4% of real regions get classified as "mig", 25.6% as "no-mig". Interpretation: the migration model is the better fit for real GN + BF data.
+
+**Why this is nice:** you get a direct fraction rather than a hard-to-interpret likelihood ratio, and the classifier's own training accuracy tells you how *distinguishable* the two models are. If the classifier can't learn to separate them cleanly (as in this paper, where it plateaued around 65-70%), the two models produce fairly overlapping distributions and you shouldn't be overly confident in the winner.
+
+**Where in the repo:** `demographic_selection_oop.py`.
+
+### Step 6: Evaluate (does the fit actually match reality?)
+
+**The question:** does data simulated under the fitted θ look like real data, absolutely? Model-selection tells you which of two variants is better; it doesn't tell you if EITHER is a good absolute fit.
+
+**How:** compare distributions of standard population-genetics summary statistics between real regions and simulated regions.
+
+**Statistics used** (all classical pop-gen metrics):
+- **π (pairwise heterozygosity):** how genetically diverse each population is on average, measured as the fraction of sites at which two random haplotypes differ.
+- **Watterson's θ:** an alternative diversity estimator based on the count of segregating sites.
+- **Site frequency spectrum (SFS):** histogram of derived allele counts across the sample.
+- **Inter-SNP distances:** how densely variants are packed along the chromosome.
+- **Linkage disequilibrium (LD) decay:** how quickly the correlation between alleles falls off as SNPs get farther apart on the chromosome.
+- **Number of distinct haplotypes:** how much haplotype diversity the sample carries.
+- **F_ST:** how differentiated the two populations are from each other in allele frequencies.
+
+For each statistic, they compute the distribution over many real regions and over many simulated regions, then measure the mismatch using **Wasserstein distance** (a.k.a. earth-mover's distance): the minimum "work" needed to transform one distribution into the other.
+
+**The paper's headline result:** for the mig model, pg-gan-mosquito simulations match real data as well as (and for F_ST, better than) the incumbent ∂a∂i-based baseline. So the fit is validated.
+
+**Where in the repo:** `summary_stats_multi.py`, `ss_helpers.py`.
 
 ## Notebooks
 

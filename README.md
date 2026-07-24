@@ -221,6 +221,41 @@ For each statistic, they compute the distribution over many real regions and ove
 - The genotype matrix is essentially a black-and-white image (SNPs × haplotypes, values 0/1). Population-genetics CNNs treat it exactly like that.
 - Same θ + different seeds → statistical noise; different θ + same seed → systematic differences. The CNN's job is to distinguish (b) from (a) using many regions at once.
 
+---
+
+## Companion project: DNA Language Model Benchmarking
+
+A separate line of inquiry, sharing the same *Anopheles gambiae* context but independent of pg-gan-mosquito.
+
+**Motivating question.** DNA foundation models (Nucleotide Transformer, DNABERT-2, HyenaDNA) were pretrained on hundreds of genomes and are increasingly used as feature extractors for downstream genomics ML. *An. gambiae* is a non-model organism relative to human-centric benchmarks. Do these models transfer meaningfully to mosquito data, and if so, uniformly or only for particular sequence types?
+
+**Notebooks in `protein-lm/notebooks/`:**
+
+- `00_setup.ipynb`: venv, path, and GPU sanity checks
+- `01_tokenization_comparison.ipynb`: side-by-side of 6-mer (NT-v2), BPE (DNABERT-2), and single-nucleotide (HyenaDNA) tokenization on the same 200 bp synthetic sequence with common promoter motifs
+- `02_perplexity_benchmark.ipynb`: masked-LM (NT-v2) and causal-LM (HyenaDNA) perplexity on 50 random 500 bp windows from chromosome 3L of the AgamP4 reference genome
+- `03_perplexity_benchmark_coding.ipynb`: same benchmark restricted to spliced protein-coding sequences (CDS) on 3L, sampled per-transcript
+
+**Preliminary findings:**
+
+- **Foundation models trained on 850 diverse genomes show weak transfer to *An. gambiae* 3L.** NT-v2 mean MLM loss on random 3L windows: **8.560**, versus a uniform-baseline of **8.320** (essentially at chance). Correct-token probability is 3.2× uniform on average, but top-1 accuracy is 0 percent across 100 sampled positions.
+- **The weakness is not attributable to non-coding sequence content.** Restricting the input to spliced CDS from chromosome 3L produces essentially the same loss (**8.722** for NT-v2, **1.428** for HyenaDNA), differing by less than 0.2 from the random-window numbers.
+- **Transfer failure appears species-specific rather than sequence-type-specific.** Neither coding grammar (codon usage, splice signals) nor non-coding grammar is being captured well by pretraining on other species. This motivates domain-adapted pretraining or fine-tuning on Ag1000G data as a specific mitigation.
+- **DNABERT-2 was excluded from the benchmark** due to a known compatibility issue between its custom BertConfig and current transformers versions. Fixing this requires either manual state-dict remapping (MosaicBERT to standard BertForMaskedLM layer names) or a transformers downgrade that would risk breaking NT-v2. Left as open follow-up.
+
+**Data used:**
+
+- AgamP4 reference genome, Ensembl Metazoa release-58, chromosomes 3L and (available for extension) 3R
+- Ensembl Metazoa release-58 GTF annotation for CDS coordinate parsing
+
+**Setup differs from the pg-gan-mosquito environment** (TensorFlow-based). This companion project uses a separate Python 3.11 venv with PyTorch, HuggingFace transformers, pyfaidx, and biopython. Data paths in the notebooks are currently hard-coded to a local drive layout; adapt them to your machine if reproducing.
+
+Figures saved in `protein-lm/outputs/`:
+- `perplexity_comparison.png`: NT-v2 and HyenaDNA loss on random 3L windows (from notebook 02)
+- `perplexity_random_vs_coding.png`: grouped bar chart contrasting random windows against spliced CDS (from notebook 03)
+
+---
+
 ## Setup
 
 ### 1. Clone this repo and pg-gan-mosquito as siblings
